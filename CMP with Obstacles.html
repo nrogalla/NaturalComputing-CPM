@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Obstacles</title>
+<style type="text/css">
+body{
+		font-family: "HelveticaNeue-Light", "Helvetica Neue Light", "Helvetica Neue",
+		 Helvetica, Arial, "Lucida Grande", sans-serif;
+	 padding : 15px;
+	 max-width: 600px;
+	 margin: auto;
+}
+td {
+	 padding: 10px;
+	 vertical-align: top;
+}
+</style>
+
+
+<script src="./artistoo.js"></script>
+<script src="./fpsmeter.min.js"></script>
+<script>
+"use strict"
+
+
+/*	----------------------------------
+	CONFIGURATION SETTINGS
+	----------------------------------
+*/
+let config = {
+
+	// Grid settings
+	ndim : 2,
+	field_size : [200,200],
+	
+	// CPM parameters and configuration
+	conf : {
+		// Basic CPM parameters
+		torus : [true,true],						// Should the grid have linked borders?
+		seed : 1,							// Seed for random number generation.
+		T : 20,								// CPM temperature
+		
+		// Constraint parameters. 
+		// Mostly these have the format of an array in which each element specifies the
+		// parameter value for one of the cellkinds on the grid.
+		// First value is always cellkind 0 (the background) and is often not used.
+
+		// Adhesion parameters:
+		J: [[0 ,20,20],    // background 
+			[20,0,0],      // green
+			[20,0,0]],  // blue
+		
+		// VolumeConstraint parameters
+		LAMBDA_V : [0,0,50],					// VolumeConstraint importance per cellkind
+		V : [0,0,200],						// Target volume of each cellkind
+		
+		LAMBDA_P : [0,0,2],
+		P : [0,0,160],
+		
+		LAMBDA_ACT : [0, 0, 200],
+		MAX_ACT : [0, 0, 80],
+		ACT_MEAN : "geometric",
+
+        IS_BARRIER : [false, true, false],
+	},
+	
+	// Simulation setup and configuration
+	simsettings : {
+	
+		// Cells on the grid
+		NRCELLS : [25,150],					// Number of cells to seed for all
+		// non-background cellkinds.
+		// Runtime etc
+		BURNIN : 0,
+		RUNTIME : 1000,
+		RUNTIME_BROWSER : 50000,
+		
+		// Visualization
+		CANVASCOLOR : "eaecef",
+		CELLCOLOR : ["000000","0080FF"],
+		ACTCOLOR : [true,true],					// Should pixel activity values be displayed?
+		SHOWBORDERS : [true,false],				// Should cellborders be displayed?
+		zoom : 2,							// zoom in on canvas with this factor.
+		
+		// Output images
+		SAVEIMG : true,						// Should a png image of the grid be saved
+		// during the simulation?
+		IMGFRAMERATE : 1,					// If so, do this every <IMGFRAMERATE> MCS.
+		SAVEPATH : "output/img/Obstacles",// ... And save the image in this folder.
+		EXPNAME : "Obstacles",			// Used for the filename of output images.
+		
+		// Output stats etc
+		STATSOUT : { browser: true, node: true }, // Should stats be computed?
+		LOGRATE : 10							// Output stats every <LOGRATE> MCS.
+
+	}
+}
+/*	---------------------------------- */
+let sim, meter
+let activity_list = []
+let average_directionality_x_list = []
+let average_directionality_y_list =[]
+let old_cellpixels
+function initialize(){
+	 /* 	The following functions are defined below and will be added to
+	 	the simulation object. If Custom-methods above is set to false,
+	 	this object is ignored and not used in the html/node files. */
+	 let custommethods = {
+	 	initializeGrid : initializeGrid,
+        logStats : logStats
+	 }
+	sim = new CPM.Simulation( config, custommethods)
+
+	meter = new FPSMeter({left:"auto", right:"5px"})
+	step()
+}
+
+
+function step(){
+	sim.step()
+	meter.tick()
+	if( sim.conf["RUNTIME_BROWSER"] == "Inf" | sim.time+1 < sim.conf["RUNTIME_BROWSER"] ){
+		requestAnimationFrame( step )
+	}
+	
+}
+
+// This is the same as the basic initializeGrid() function, but now we
+// also allow each cell to have a small burnin period just after seeding.
+function initializeGrid() {
+    if (!this.helpClasses["gm"]) {this.addGridManipulator() }
+
+	let nrcells = this.conf["NRCELLS"], cellkind, i
+
+    let x = 0;
+    let y = 0;
+
+    let r = 4;
+    let field_length = 200;
+    let obstacle_field = field_length * field_length;
+
+    let distance_cells = Math.floor(Math.sqrt(obstacle_field / nrcells[0])) + 1;
+    // Seed the right number of cells for each cellkind
+    for (let cellkind = 0; cellkind < nrcells.length; cellkind++) {
+        for (let i = 0; i < nrcells[cellkind]; i++) {
+            if (cellkind == 0) {
+                let centerX = x * distance_cells + Math.floor(distance_cells / 2);
+                let centerY = y * distance_cells + Math.floor(distance_cells / 2);
+
+                let circle = this.gm.makeCircle([centerX, centerY], r);
+                let cid = this.C.makeNewCellID(1);
+                this.gm.assignCellPixels(circle, cellkind, cid) 
+
+                x++;
+                if (x * distance_cells >= field_length) {
+                    x = 0;
+                    y++;
+                }
+            } else {
+                this.gm.seedCell(cellkind + 1)
+            }
+            // Burnin for each cell
+            for (let b = 0; b < 5; b++) {
+                this.C.monteCarloStep()
+            }
+        }
+    }
+}
+
+class AverageActivity extends CPM.Stat {
+	
+	computeActivityOfCell( cid, cellpixels ){
+		// Get the array of pixels for this cell
+		const current_pixels = cellpixels[cid]
+	
+		// The length of this array tells us the number of pixels:
+		const totalPixels = current_pixels.length
+        
+        if ( totalPixels == 0 ) {
+            return 0
+        }
+
+		// Loop over pixels of the current cell and count the active ones:
+		let activity = 0
+		for( let i = 0; i < current_pixels.length; i++ ){
+			// PixelsByCell returns ArrayCoordinates, but we need to convert those
+			// to IndexCoordinates to look up the activity using the pxact() method.
+			const pos = this.M.grid.p2i( current_pixels[i] )
+			if( this.M.getConstraint( "ActivityConstraint" ).pxact( pos ) > 0 ){
+				activity += this.M.getConstraint( "ActivityConstraint" ).pxact( pos )
+			}
+		}
+
+		return activity / totalPixels
+	}
+	
+	compute(){
+		// Get object with arrays of pixels for each cell on the grid, and get
+		// the array for the current cell.
+		const cellpixels = this.M.getStat( CPM.PixelsByCell ) 
+				
+		// Create an object for the output, then add stat for each cell in the loop.
+		let activities = {}
+		for( let cid of this.M.cellIDs() ){
+            activities[cid] = this.computeActivityOfCell( cid, cellpixels )
+		}
+		
+		return activities
+	}
+}
+
+class AverageDirectionality extends CPM.Stat {
+	
+	
+	computeDirectionOfCell( cid, cellpixels,old_cellpixels ){
+		// Get the array of pixels for this cell
+		const current_pixels = cellpixels[cid]
+		
+		const old_pixels = old_cellpixels[cid]
+		
+		
+		// The length of this array tells us the number of pixels:
+		const totalPixels = current_pixels.length
+        
+        if ( totalPixels == 0 ) {
+            return [0,0]
+        }
+
+		let x_direction = 0
+		let y_direction = 0
+		for( let i = 0; i < current_pixels.length; i++ ){
+			const pos =  current_pixels[i]
+			if (i < old_pixels.length) {
+				const old_pos = old_pixels[i]
+				// determine movement direction x-axis
+				if (pos[0] > old_pos[0]) {
+					x_direction += 1
+				} else if (pos[0] < old_pos[0]) {
+					x_direction -= 1
+				}
+				// determine movement direction y-axis
+				if (pos[1] > old_pos[1]) {
+					y_direction += 1
+				} else if (pos[1] < old_pos[1]) {
+					y_direction -= 1
+				}
+				}
+		}
+		// Compute the average of x and y coordinates
+		var averageX = x_direction / totalPixels;
+		var averageY = y_direction / totalPixels;
+		return [averageX, averageY]
+	}
+	compute(){
+		//let last_position = CPM.PixelsByCell;
+		// Get object with arrays of pixels for each cell on the grid, and get
+		// the array for the current cell.
+		const cellpixels = this.M.getStat( CPM.PixelsByCell ) 
+		if (old_cellpixels === undefined) {
+			old_cellpixels = JSON.parse(JSON.stringify(cellpixels));
+			
+			return null;
+		}
+		
+		// Create an object for the output, then add stat for each cell in the loop.
+		let directions = {}
+		for( let cid of this.M.cellIDs() ){
+            directions[cid] = this.computeDirectionOfCell( cid, cellpixels , old_cellpixels)
+		}
+		old_cellpixels = JSON.parse(JSON.stringify(cellpixels));
+		return directions
+	}
+}
+function logStats(){
+	
+    const allactivities = this.C.getStat(AverageActivity);
+	const alldirections = this.C.getStat(AverageDirectionality);
+    const nrcells = this.conf["NRCELLS"][1];
+
+    let average_activity = 0;
+    for (let cid of this.C.cellIDs()){
+        if (this.C.cellKind(cid) != 1) {
+            let theact = allactivities[cid];
+            average_activity += theact;
+        }
+    }
+	
+    average_activity = (average_activity / nrcells).toFixed(2);
+	activity_list.push(average_activity)
+
+	let average_directionality_x = 0;
+	let average_directionality_y = 0;
+	if (alldirections !== null) {
+		for (let cid of this.C.cellIDs()){
+			if (this.C.cellKind(cid) != 1) {
+				let thedir = alldirections[cid];
+			
+				average_directionality_x += thedir[0];
+				average_directionality_y += thedir[1];
+				
+			}
+		}
+	}
+	average_directionality_x = (average_directionality_x / nrcells).toFixed(2);
+	average_directionality_y = (average_directionality_y / nrcells).toFixed(2);
+	average_directionality_x_list.push(average_directionality_x)
+	average_directionality_y_list.push(average_directionality_y)
+	document.getElementById("averageActivity").innerText = "Average Activity: " + average_activity;
+    document.getElementById("averageDirectionality").innerText = "Average Directionality: [" + average_directionality_x + ", " + average_directionality_y +"]";
+
+}
+
+ 
+/* The following custom methods are used for control buttons on the html page.*/
+function startsim(){
+	if( !sim.running ){
+		sim.running = true
+	}
+}
+function stopsim(){
+	sim.running = false
+}
+
+
+// Function to convert list to CSV format
+function convertToCSV(data) {
+    let csv = '';
+    data.forEach(function(value) {
+        csv += value + '\n'; // Each value is written on a new line
+    });
+    return csv;
+}
+
+// Function to download CSV file
+function downloadCSV(csv, filename) {
+    let csvFile = new Blob([csv], {type: 'text/csv'});
+    let link = document.createElement('a');
+    link.href = window.URL.createObjectURL(csvFile);
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+// Function to save list to CSV file
+function saveToCSV() {
+    let csv = convertToCSV(activity_list);
+    downloadCSV(csv, 'data.csv');
+
+	let csv2 = convertToCSV(average_directionality_x_list);
+	downloadCSV(csv2, "dir_x.csv");
+
+	let csv3 = convertToCSV(average_directionality_y_list);
+	downloadCSV(csv3, "dir_y.csv")
+}
+
+// Automatically trigger download after 100 seconds
+setTimeout(saveToCSV, 100000);  
+</script>
+</head>
+<body onload="initialize()">
+  
+<h1> Obstacles</h1>
+<br>
+<button onclick="startsim()">start</button>
+<button onclick="stopsim()">stop</button>
+<br>
+<div class="slidecontainer">
+<form autocomplete="off">
+<table>
+<tr>
+	<td>T</td><td>
+	<input type="text" value="20" id="t" oninput="sim.C.conf.T=this.value">
+	</td>
+	<td>Framerate</td><td>
+	<input type="text" value="1" id="frames" oninput="sim.conf['IMGFRAMERATE']=this.value">
+	</td>
+</tr>
+</table>
+</form>
+</div>
+<div id="averageActivity"></div>
+<div id="averageDirectionality"></div>
+</body>
+</html>
